@@ -1,0 +1,3 @@
+2025-10-23 10:52:00,515 | INFO | ¢º starting trader... testnet=False
+2025-10-23 10:55:01,837 | INFO | HB | L:0 S:0 close=108156.90 vwap=108238.65 std=138.1548 bands=[L107976.15 / U108528.77] mom10=0.0026 tpL=None slL=None tpS=None slS=None eq=0.00 dd=0.00% halt=False
+2025-10-23 10:55:52,291 | INFO | ¢º starting trader... testnet=False
