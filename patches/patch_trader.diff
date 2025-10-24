@@ -1,0 +1,68 @@
+--- src/strategy/trader.py (orig)
++++ src/strategy/trader.py (guarded)
+@@ -13,6 +13,7 @@
+ from exchange.binance_utils import get_filters, get_equity_USDC, get_mark_price
+ from strategy.indicators import fetch_latest_ohlcv, compute_indicators
+ from storage.trade_logger import TradeCSV
++from strategy.guards import price_protect_ok, locked_now, set_daily_lock
+ 
+ 
+ class Trader:
+@@ -41,6 +42,7 @@
+         self.day_start_eq: Optional[float] = None
+         self.consec_sl: int = 0
+         self.halt: bool = False  # 연속 SL 가드 발동시 신규 진입 차단
++        self.halt_until = None  # cooldown timestamp
+ 
+         self.tickSize, self.stepSize, self.minQty, self.minNotional = get_filters(ex, cfg.SYMBOL)
+ 
+@@ -150,8 +152,15 @@
+         return not (self.cfg.KST_FILTER_START <= h < self.cfg.KST_FILTER_END)
+ 
+     def evaluate_signals(self, ind: pd.DataFrame) -> List[Dict[str, Any]]:
++        if locked_now():
++            return []
+         if self.halt:
+-            return []
++            # cooldown handling
++            if self.halt_until and now_kst() >= self.halt_until:
++                self.halt = False
++                self.halt_until = None
++            else:
++                return []
+ 
+         if ind.empty:
+             return []
+@@ -386,6 +395,8 @@
+     def _trigger_consec_halt(self) -> None:
+         msg = f"[SESSION HALT] consecutive SL = {self.consec_sl} (>= {self.cfg.MAX_CONSEC_SL})"
+         self.halt = True
++        if getattr(self.cfg, 'COOLDOWN_MIN_AFTER_K_LOSSES', 0) > 0:
++            self.halt_until = now_kst() + __import__('datetime').timedelta(minutes=self.cfg.COOLDOWN_MIN_AFTER_K_LOSSES)
+         self.logger.warning(msg)
+         self.tlog.write(now_kst().isoformat(), "STOP_CONSEC_SL", None, None, None, None, None, get_equity_USDC(self.ex), msg)
+ 
+@@ -439,6 +450,10 @@
+                     self.logger.warning(msg)
+                     self.flatten_all()
+                     self.tlog.write(now_kst().isoformat(), "KILL_DD", None, None, None, None, None, cur_eq, msg)
++                    try:
++                        set_daily_lock(getattr(self.cfg, 'DAILY_LOCK_HOURS_AFTER_DD', 0))
++                    except Exception:
++                        pass
+                     break
+ 
+                 # 데이터 & 인디케이터
+@@ -446,6 +461,12 @@
+                 ind = compute_indicators(df, self.cfg)
+                 if ind.empty:
+                     self.logger.info("indicators empty, skip tick")
++                    continue
++
++                ok, reason = price_protect_ok(self.ex, self.cfg.SYMBOL, self.cfg, self.logger)
++                if not ok:
++                    self.logger.info(f"[GUARD] pre-entry blocked: {reason}")
++                    time.sleep(max(0.1, self.cfg.MAIN_LOOP_SLEEP_MS/1000.0))
+                     continue
+ 
+                 # 거래소 실제 포지션과 내부 상태 동기화 (체결 누락 대비)

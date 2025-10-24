@@ -1,0 +1,39 @@
+--- src/main.py (orig)
++++ src/main.py (guarded)
+@@ -1,4 +1,4 @@
+-from config.settings import Config
++from config_loader import CFG
+ from utils.logger import setup_logger
+ from exchange.binance_utils import (
+     make_exchange,
+@@ -7,19 +7,26 @@
+ )
+ from storage.trade_logger import TradeCSV
+ from strategy.trader import Trader
++from strategy.guards import startup_preflight, locked_now
+ 
+ 
+ def main() -> None:
+     logger = setup_logger("live", logfile="logs/live.log")
+-    cfg = Config()
++    cfg = CFG
+ 
+     ex = make_exchange(cfg)
+     ex.load_markets()
+ 
+-    # Hedge mode + Cross + leverage
+-    safe_set_position_mode_hedge(ex, enable=True)
+-    safe_set_margin_and_leverage(ex, cfg.SYMBOL, leverage=cfg.LEVERAGE_SET, margin_mode="cross")
++    # Startup safety
++    startup_preflight(ex, cfg, logger)
+ 
++    # Hedge/Cross/Leverage from config
++    safe_set_position_mode_hedge(ex, enable=(cfg.POSITION_MODE == 'hedge'))
++    safe_set_margin_and_leverage(ex, cfg.SYMBOL, leverage=cfg.LEVERAGE_SET, margin_mode=cfg.MARGIN_MODE)
++
++    if locked_now():
++        logger.warning("[LOCK] Daily DD lock active. Exiting.")
++        return
+     trader = Trader(ex, cfg, logger=logger, tlog=TradeCSV("logs/trades_live.csv"))
+     trader.run()
+ 

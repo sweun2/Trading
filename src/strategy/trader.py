@@ -8,11 +8,12 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from utils.math_utils import round_step
-from utils.time_utils import now_kst, align_to_next_close
-from exchange.binance_utils import get_filters, get_equity_USDC, get_mark_price
-from strategy.indicators import fetch_latest_ohlcv, compute_indicators
-from storage.trade_logger import TradeCSV
+from src.utils.math_utils import round_step
+from src.utils.time_utils import now_kst, align_to_next_close
+from src.exchange.binance_utils import get_filters, get_equity_USDC, get_mark_price
+from src.strategy.indicators import fetch_latest_ohlcv, compute_indicators
+from src.storage.trade_logger import TradeCSV
+from src.strategy.guards import price_protect_ok, locked_now, set_daily_lock
 
 
 class Trader:
@@ -41,6 +42,7 @@ class Trader:
         self.day_start_eq: Optional[float] = None
         self.consec_sl: int = 0
         self.halt: bool = False  # 연속 SL 가드 발동시 신규 진입 차단
+        self.halt_until = None  # cooldown timestamp
 
         self.tickSize, self.stepSize, self.minQty, self.minNotional = get_filters(ex, cfg.SYMBOL)
 
@@ -130,7 +132,9 @@ class Trader:
             "workingType": "MARK_PRICE",
             "positionSide": self._position_side_str(side),
         }
-        return self.ex.create_order(self.cfg.SYMBOL, "stop_market", ord_side, qty, None, params)
+        params.update({"closePosition": True})
+        # STOP_MARKET + closePosition -> qty는 None이어야 함
+        return self.ex.create_order(self.cfg.SYMBOL, "stop_market", ord_side, None, None, params)
 
     # ========== 사이징 ==========
     def compute_qty(self, entry_px: float, equity_USDC: float) -> float:
@@ -150,8 +154,15 @@ class Trader:
         return not (self.cfg.KST_FILTER_START <= h < self.cfg.KST_FILTER_END)
 
     def evaluate_signals(self, ind: pd.DataFrame) -> List[Dict[str, Any]]:
-        if self.halt:
+        if locked_now():
             return []
+        if self.halt:
+            # cooldown handling
+            if self.halt_until and now_kst() >= self.halt_until:
+                self.halt = False
+                self.halt_until = None
+            else:
+                return []
 
         if ind.empty:
             return []
@@ -234,7 +245,24 @@ class Trader:
                     self.logger.warning(f"[SHORT] SL 재설정 실패: {e}")
             return changed
 
-    # ========== 체결 감지 ==========
+    
+# ========== 사이드별 오픈오더 일괄 취소 (보호주문/수동 주문 잔존 정리) ==========
+    def cancel_all_open_orders_for_side(self, side: str) -> None:
+        """positionSide 기준으로 심볼의 모든 오픈 오더 취소"""
+        try:
+            desired = self._position_side_str(side)  # 'LONG' or 'SHORT'
+            oo = self.ex.fetch_open_orders(self.cfg.SYMBOL)
+            for o in oo:
+                pos_side = (o.get("info", {}) or {}).get("positionSide") or o.get("positionSide")
+                if (pos_side or "").upper() == desired:
+                    try:
+                        self.ex.cancel_order(o["id"], self.cfg.SYMBOL)
+                    except Exception as e:  # noqa: BLE001
+                        self.logger.warning(f"[CANCEL {desired}] failed: {e}")
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning(f"[CANCEL {side}] list failed: {e}")
+
+# ========== 체결 감지 ==========
     def _detect_and_finalize_exit(self, side: str, ind_row: pd.Series) -> None:
         try:
             oo = self.ex.fetch_open_orders(self.cfg.SYMBOL)
@@ -386,6 +414,8 @@ class Trader:
     def _trigger_consec_halt(self) -> None:
         msg = f"[SESSION HALT] consecutive SL = {self.consec_sl} (>= {self.cfg.MAX_CONSEC_SL})"
         self.halt = True
+        if getattr(self.cfg, 'COOLDOWN_MIN_AFTER_K_LOSSES', 0) > 0:
+            self.halt_until = now_kst() + __import__('datetime').timedelta(minutes=self.cfg.COOLDOWN_MIN_AFTER_K_LOSSES)
         self.logger.warning(msg)
         self.tlog.write(now_kst().isoformat(), "STOP_CONSEC_SL", None, None, None, None, None, get_equity_USDC(self.ex), msg)
 
@@ -396,6 +426,7 @@ class Trader:
             try:
                 self.cancel_entry_order(side)
                 self.cancel_side_tp_sl(side)
+                self.cancel_all_open_orders_for_side(side)
                 if pos:
                     ord_side = "sell" if side=="long" else "buy"
                     # Hedge 모드: reduceOnly 없이 positionSide로 정확히 닫음
@@ -439,6 +470,10 @@ class Trader:
                     self.logger.warning(msg)
                     self.flatten_all()
                     self.tlog.write(now_kst().isoformat(), "KILL_DD", None, None, None, None, None, cur_eq, msg)
+                    try:
+                        set_daily_lock(getattr(self.cfg, 'DAILY_LOCK_HOURS_AFTER_DD', 0))
+                    except Exception:
+                        pass
                     break
 
                 # 데이터 & 인디케이터
@@ -446,6 +481,12 @@ class Trader:
                 ind = compute_indicators(df, self.cfg)
                 if ind.empty:
                     self.logger.info("indicators empty, skip tick")
+                    continue
+
+                ok, reason = price_protect_ok(self.ex, self.cfg.SYMBOL, self.cfg, self.logger)
+                if not ok:
+                    self.logger.info(f"[GUARD] pre-entry blocked: {reason}")
+                    time.sleep(max(0.1, self.cfg.MAIN_LOOP_SLEEP_MS/1000.0))
                     continue
 
                 # 거래소 실제 포지션과 내부 상태 동기화 (체결 누락 대비)

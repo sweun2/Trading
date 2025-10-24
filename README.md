@@ -8,7 +8,7 @@ Includes type hints and minimal test scaffolding.
 ```bash
 pip install -r requirements.txt
 # Put your secrets in config.ini (see config.sample.ini)
-python src/main.py
+python -m, src.main
 ```
 
 ## Tests
@@ -33,3 +33,5 @@ tests/
   test_indicators.py
   test_trader.py
 ```
+
+

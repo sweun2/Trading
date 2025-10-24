@@ -1,0 +1,47 @@
+--- src/strategy/trader.py
++++ src/strategy/trader.py
+@@ -130,7 +130,9 @@
+             "workingType": "MARK_PRICE",
+             "positionSide": self._position_side_str(side),
+         }
+-        return self.ex.create_order(self.cfg.SYMBOL, "stop_market", ord_side, qty, None, params)
++        params.update({"closePosition": True})
++        # STOP_MARKET + closePosition -> qty는 None이어야 함
++        return self.ex.create_order(self.cfg.SYMBOL, "stop_market", ord_side, None, None, params)
+ 
+     # ========== 사이징 ==========
+     def compute_qty(self, entry_px: float, equity_USDC: float) -> float:
+@@ -234,7 +236,24 @@
+                     self.logger.warning(f"[SHORT] SL 재설정 실패: {e}")
+             return changed
+ 
+-    # ========== 체결 감지 ==========
++    
++# ========== 사이드별 오픈오더 일괄 취소 (보호주문/수동 주문 잔존 정리) ==========
++def cancel_all_open_orders_for_side(self, side: str) -> None:
++    """positionSide 기준으로 심볼의 모든 오픈 오더 취소"""
++    try:
++        desired = self._position_side_str(side)  # 'LONG' or 'SHORT'
++        oo = self.ex.fetch_open_orders(self.cfg.SYMBOL)
++        for o in oo:
++            pos_side = (o.get("info", {}) or {}).get("positionSide") or o.get("positionSide")
++            if (pos_side or "").upper() == desired:
++                try:
++                    self.ex.cancel_order(o["id"], self.cfg.SYMBOL)
++                except Exception as e:  # noqa: BLE001
++                    self.logger.warning(f"[CANCEL {desired}] failed: {e}")
++    except Exception as e:  # noqa: BLE001
++        self.logger.warning(f"[CANCEL {side}] list failed: {e}")
++
++# ========== 체결 감지 ==========
+     def _detect_and_finalize_exit(self, side: str, ind_row: pd.Series) -> None:
+         try:
+             oo = self.ex.fetch_open_orders(self.cfg.SYMBOL)
+@@ -396,6 +415,7 @@
+             try:
+                 self.cancel_entry_order(side)
+                 self.cancel_side_tp_sl(side)
++                self.cancel_all_open_orders_for_side(side)
+                 if pos:
+                     ord_side = "sell" if side=="long" else "buy"
+                     # Hedge 모드: reduceOnly 없이 positionSide로 정확히 닫음

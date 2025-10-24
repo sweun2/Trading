@@ -1,5 +1,6 @@
 from pathlib import Path
 import csv
+from typing import Optional
 
 
 class TradeCSV:
@@ -18,13 +19,13 @@ class TradeCSV:
         self,
         ts: str,
         event: str,
-        side: str | None,
-        entry_px: float | None,
-        exit_px: float | None,
-        qty: float | None,
-        pnl_pct: float | None,
-        equity: float | None,
-        reason: str | None,
+        side: Optional[str],
+        entry_px: Optional[float],
+        exit_px: Optional[float],
+        qty: Optional[float],
+        pnl_pct: Optional[float],
+        equity: Optional[float],
+        reason: Optional[str],
     ) -> None:
         with self.path.open("a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
