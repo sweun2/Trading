@@ -527,6 +527,21 @@ class Trader:
                         else:
                             best_ask = ob["asks"][0][0] if ob["asks"] else mark_px
                             entry_px = round_step(best_ask + (self.tickSize or 0.0), self.tickSize or 1e-8, "ceil")
+                            
+                        if slot == "long":
+                            best_bid = ob["bids"][0][0] if ob["bids"] else mark_px
+                            # TP 기준 진입 희망가 계산
+                            target_entry = vwap * (1 - 0.0005)
+                            # best_bid와 target_entry 중 낮은 가격 선택 (즉, 무리한 체결 방지)
+                            raw_entry = min(best_bid - (self.tickSize or 0.0), target_entry)
+                            entry_px = round_step(raw_entry, self.tickSize or 1e-8, "floor")
+
+                        else:
+                            best_ask = ob["asks"][0][0] if ob["asks"] else mark_px
+                            target_entry = vwap * (1 + 0.0005)
+                            raw_entry = max(best_ask + (self.tickSize or 0.0), target_entry)
+                            entry_px = round_step(raw_entry, self.tickSize or 1e-8, "ceil")
+    
                         self.logger.info(f"[ENTRY {slot.upper()}] post-only px≈{entry_px:.2f} qty={qty}")
                         od = self.place_entry(slot, qty, px=entry_px)
                         if slot == "long":
